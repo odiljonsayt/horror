@@ -3,31 +3,22 @@ import os
 import logging
 import sqlite3
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ContextTypes, filters,
 )
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(message)s",
-    level=logging.INFO,
-)
+logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TOKEN = os.environ["BOT_TOKEN"]
 ADMIN_ID = int(os.environ["ADMIN_ID"])
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
-CHANNEL_URL = os.environ.get("CHANNEL_URL", "").strip()
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() or "@ujas_kino_tarjima"
+CHANNEL_URL = os.environ.get("CHANNEL_URL", "").strip() or "https://t.me/ujas_kino_tarjima"
 DB_FILE = "movies.db"
+
+PROMPT = "🍿 Qidirmoqchi bo‘lgan kinoyingiz kodini yozing."
 
 
 def db():
@@ -39,25 +30,16 @@ def db():
             file_id TEXT NOT NULL
         )
     """)
+    columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(movies)")
+    }
+    if "code" not in columns:
+        conn.execute("ALTER TABLE movies ADD COLUMN code TEXT")
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_movies_code
+        ON movies(code) WHERE code IS NOT NULL
+    """)
     return conn
-
-
-def get_movies():
-    with db() as conn:
-        return conn.execute(
-            "SELECT id, title FROM movies ORDER BY id DESC"
-        ).fetchall()
-
-
-def main_menu(user_id):
-    rows = [[
-        InlineKeyboardButton("🎬 Kinolar", callback_data="movies")
-    ]]
-    if user_id == ADMIN_ID:
-        rows.append([
-            InlineKeyboardButton("⚙️ Admin panel", callback_data="admin")
-        ])
-    return InlineKeyboardMarkup(rows)
 
 
 def admin_menu():
@@ -65,18 +47,22 @@ def admin_menu():
         [InlineKeyboardButton("➕ Kino qo‘shish", callback_data="add")],
         [InlineKeyboardButton("🗑️ Kino o‘chirish", callback_data="delete")],
         [InlineKeyboardButton("📋 Kino ro‘yxati", callback_data="list")],
-        [InlineKeyboardButton("🏠 Bosh menyu", callback_data="home")],
+    ])
+
+
+def subscription_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Kanalga obuna bo‘lish", url=CHANNEL_URL)],
+        [InlineKeyboardButton("✅ Obunani tekshirish", callback_data="check_sub")],
     ])
 
 
 async def is_subscribed(user_id, context):
-    if not CHANNEL_ID:
+    if user_id == ADMIN_ID:
         return True
-
     try:
         member = await context.bot.get_chat_member(
-            chat_id=CHANNEL_ID,
-            user_id=user_id,
+            chat_id=CHANNEL_ID, user_id=user_id
         )
         return member.status in ("member", "administrator", "creator")
     except Exception:
@@ -84,66 +70,32 @@ async def is_subscribed(user_id, context):
         return False
 
 
+async def ask_to_subscribe(message):
+    await message.reply_text(
+        "🍿 Botdan foydalanish uchun avval kanalimizga obuna bo‘ling.",
+        reply_markup=subscription_keyboard(),
+    )
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-
-    if CHANNEL_ID and not await is_subscribed(
-        update.effective_user.id, context
-    ):
-        keyboard = []
-        if CHANNEL_URL:
-            keyboard.append([
-                InlineKeyboardButton(
-                    "📢 Kanalga obuna bo‘lish",
-                    url=CHANNEL_URL,
-                )
-            ])
-        keyboard.append([
-            InlineKeyboardButton(
-                "✅ Obunani tekshirish",
-                callback_data="check_sub",
-            )
-        ])
-        await update.message.reply_text(
-            "🍿 Kino botiga xush kelibsiz!\n\n"
-            "Davom etish uchun kanalimizga obuna bo‘ling.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+    if not await is_subscribed(update.effective_user.id, context):
+        await ask_to_subscribe(update.message)
         return
-
-    await update.message.reply_text(
-        "🍿 Kino botimizga xush kelibsiz!\n\n"
-        "Menyudan tanlang:",
-        reply_markup=main_menu(update.effective_user.id),
-    )
+    await update.message.reply_text(PROMPT)
 
 
-async def show_movies(query):
-    movies = get_movies()
-
-    if not movies:
-        await query.edit_message_text(
-            "🎬 Hozircha kinolar qo‘shilmagan.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏠 Bosh menyu", callback_data="home")
-            ]]),
-        )
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Bu buyruq faqat admin uchun.")
         return
+    context.user_data.clear()
+    await update.message.reply_text("⚙️ Admin panel", reply_markup=admin_menu())
 
-    keyboard = [
-        [InlineKeyboardButton(
-            f"🎬 {title}", callback_data=f"movie:{movie_id}"
-        )]
-        for movie_id, title in movies
-    ]
-    keyboard.append([
-        InlineKeyboardButton("🏠 Bosh menyu", callback_data="home")
-    ])
 
-    await query.edit_message_text(
-        "🎬 Kerakli kinoni tanlang:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text(PROMPT)
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -153,92 +105,58 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
 
     if data == "check_sub":
-        if not CHANNEL_ID:
-            await query.edit_message_text(
-                "Kanal sozlanmagan. Admin bilan bog‘laning."
-            )
-        elif await is_subscribed(user_id, context):
-            await query.edit_message_text(
-                "✅ Obuna tasdiqlandi! Botga /start yuboring."
-            )
+        if await is_subscribed(user_id, context):
+            await query.edit_message_text(PROMPT)
         else:
             await query.answer(
                 "Avval kanalga obuna bo‘ling!", show_alert=True
             )
         return
 
-    if CHANNEL_ID and not await is_subscribed(user_id, context):
-        await query.answer(
-            "Avval kanalga obuna bo‘ling!", show_alert=True
-        )
-        return
-
-    if data == "home":
-        context.user_data.clear()
-        await query.edit_message_text(
-            "🏠 Bosh menyu:",
-            reply_markup=main_menu(user_id),
-        )
-        return
-
-    if data == "movies":
-        await show_movies(query)
-        return
-
-    if data == "admin":
-        if user_id != ADMIN_ID:
-            await query.answer("Ruxsat yo‘q!", show_alert=True)
-            return
-        context.user_data.clear()
-        await query.edit_message_text(
-            "⚙️ Admin panel",
-            reply_markup=admin_menu(),
-        )
+    if user_id != ADMIN_ID:
+        if not await is_subscribed(user_id, context):
+            await query.answer("Avval kanalga obuna bo‘ling!", show_alert=True)
         return
 
     if data == "add":
-        if user_id != ADMIN_ID:
-            return
         context.user_data.clear()
         context.user_data["state"] = "waiting_title"
         await query.edit_message_text(
-            "➕ Kino nomini yuboring.\n\n"
-            "Bekor qilish uchun /cancel yozing."
+            "🎬 Kino nomini yuboring.\nBekor qilish: /cancel"
         )
         return
 
     if data == "list":
-        if user_id != ADMIN_ID:
-            return
-        movies = get_movies()
-        text = "📋 Kinolar ro‘yxati:\n\n"
-        text += "\n".join(
-            f"{i}. {title}" for i, (_, title) in enumerate(movies, 1)
+        with db() as conn:
+            movies = conn.execute(
+                "SELECT code, title FROM movies ORDER BY id DESC"
+            ).fetchall()
+        text = "📋 Kinolar:\n\n" + "\n".join(
+            f"🔢 {code or 'Kod belgilanmagan'} — {title}"
+            for code, title in movies
         ) if movies else "Hozircha kino yo‘q."
-        await query.edit_message_text(
-            text,
-            reply_markup=admin_menu(),
-        )
+        await query.edit_message_text(text, reply_markup=admin_menu())
         return
 
     if data == "delete":
-        if user_id != ADMIN_ID:
-            return
-        movies = get_movies()
+        with db() as conn:
+            movies = conn.execute(
+                "SELECT id, code, title FROM movies ORDER BY id DESC"
+            ).fetchall()
         if not movies:
             await query.edit_message_text(
-                "O‘chirish uchun kino yo‘q.",
-                reply_markup=admin_menu(),
+                "O‘chirish uchun kino yo‘q.", reply_markup=admin_menu()
             )
             return
         keyboard = [
             [InlineKeyboardButton(
-                f"🗑️ {title}", callback_data=f"del:{movie_id}"
+                f"🗑️ {code or 'Kodsiz'} — {title}",
+                callback_data=f"del:{movie_id}"
             )]
-            for movie_id, title in movies
+            for movie_id, code, title in movies
         ]
         keyboard.append([
-            InlineKeyboardButton("⬅️ Orqaga", callback_data="admin")
+            InlineKeyboardButton("⬅️ Orqaga", callback_data="admin_home")
         ])
         await query.edit_message_text(
             "O‘chirmoqchi bo‘lgan kinoni tanlang:",
@@ -246,102 +164,132 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    if data == "admin_home":
+        await query.edit_message_text("⚙️ Admin panel", reply_markup=admin_menu())
+        return
+
     if data.startswith("del:"):
-        if user_id != ADMIN_ID:
-            return
-        movie_id = int(data.split(":")[1])
+        movie_id = int(data.split(":", 1)[1])
         with db() as conn:
             conn.execute("DELETE FROM movies WHERE id = ?", (movie_id,))
         await query.edit_message_text(
-            "✅ Kino o‘chirildi.",
-            reply_markup=admin_menu(),
-        )
-        return
-
-    if data.startswith("movie:"):
-        movie_id = int(data.split(":")[1])
-        with db() as conn:
-            movie = conn.execute(
-                "SELECT title, file_id FROM movies WHERE id = ?",
-                (movie_id,),
-            ).fetchone()
-
-        if not movie:
-            await query.message.reply_text("Bu kino topilmadi.")
-            return
-
-        title, file_id = movie
-        await context.bot.send_video(
-            chat_id=user_id,
-            video=file_id,
-            caption=f"🎬 {title}",
-            protect_content=True,
+            "✅ Kino o‘chirildi.", reply_markup=admin_menu()
         )
 
 
 async def receive_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-    if update.effective_user.id != ADMIN_ID:
+    message = update.message
+    if not message:
         return
 
+    user_id = update.effective_user.id
     state = context.user_data.get("state")
 
-    if state == "waiting_title":
-        if not update.message.text:
-            await update.message.reply_text("Kino nomini matn qilib yuboring.")
+    # Admin: kino nomi
+    if user_id == ADMIN_ID and state == "waiting_title":
+        if not message.text or not message.text.strip():
+            await message.reply_text("Kino nomini matn qilib yuboring.")
             return
-
-        context.user_data["movie_title"] = update.message.text.strip()
-        context.user_data["state"] = "waiting_video"
-        await update.message.reply_text(
-            "✅ Nom saqlandi.\n\n"
-            "Endi kinoning videosini Telegram orqali yuboring."
+        context.user_data["movie_title"] = message.text.strip()
+        context.user_data["state"] = "waiting_code"
+        await message.reply_text(
+            "🔢 O‘zingiz tanlagan kino kodini yuboring.\n"
+            "Masalan: 777 yoki 2026.\nBekor qilish: /cancel"
         )
         return
 
-    if state == "waiting_video":
-        video = update.message.video
-        if not video:
-            await update.message.reply_text(
-                "Iltimos, kino faylini Telegram videosi sifatida yuboring."
+    # Admin: o‘zi tanlagan kod
+    if user_id == ADMIN_ID and state == "waiting_code":
+        if not message.text or not message.text.strip():
+            await message.reply_text("Kino kodini matn qilib yuboring.")
+            return
+        code = message.text.strip()
+        with db() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM movies WHERE code = ?", (code,)
+            ).fetchone()
+        if exists:
+            await message.reply_text("❌ Bu kod band. Boshqa kod tanlang.")
+            return
+        context.user_data["movie_code"] = code
+        context.user_data["state"] = "waiting_video"
+        await message.reply_text(
+            f"✅ Kod: {code}\nEndi kinoning videosini yuboring."
+        )
+        return
+
+    # Admin: video saqlash
+    if user_id == ADMIN_ID and state == "waiting_video":
+        if not message.video:
+            await message.reply_text(
+                "Kinoni Telegram videosi sifatida yuboring."
             )
             return
-
-        title = context.user_data.get("movie_title", "Nomsiz kino")
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO movies (title, file_id) VALUES (?, ?)",
-                (title, video.file_id),
-            )
+        title = context.user_data["movie_title"]
+        code = context.user_data["movie_code"]
+        try:
+            with db() as conn:
+                conn.execute(
+                    "INSERT INTO movies (title, file_id, code) VALUES (?, ?, ?)",
+                    (title, message.video.file_id, code),
+                )
+        except sqlite3.IntegrityError:
+            await message.reply_text("Bu kod band. /cancel yozib qaytadan boshlang.")
+            context.user_data.clear()
+            return
 
         context.user_data.clear()
-        await update.message.reply_text(
-            f"✅ «{title}» muvaffaqiyatli qo‘shildi!",
-            reply_markup=admin_menu(),
+        await message.reply_text(
+            f"✅ Kino saqlandi!\n🎬 {title}\n🔢 Kod: {code}\n\n"
+            "Yana kino qo‘shish uchun /admin yozing."
         )
+        return
 
+    # Foydalanuvchi: obuna tekshiruvi
+    if not await is_subscribed(user_id, context):
+        await ask_to_subscribe(message)
+        return
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text(
-        "Bekor qilindi.",
-        reply_markup=main_menu(update.effective_user.id),
+    # Foydalanuvchi: kino kodini qidirish
+    if not message.text:
+        await message.reply_text(PROMPT)
+        return
+
+    code = message.text.strip()
+    with db() as conn:
+        movie = conn.execute(
+            "SELECT title, file_id FROM movies WHERE code = ?", (code,)
+        ).fetchone()
+
+    if not movie:
+        await message.reply_text(
+            "❌ Bunday koddagi kino topilmadi. Kodni tekshirib qayta yuboring."
+        )
+        return
+
+    title, file_id = movie
+    await context.bot.send_video(
+        chat_id=user_id,
+        video=file_id,
+        caption=f"🎬 {title}",
+        protect_content=True,
     )
 
 
 def main():
-    db().close()
-    app = Application.builder().token(TOKEN).build()
+    conn = db()
+    conn.close()
 
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CallbackQueryHandler(buttons))
     app.add_handler(MessageHandler(
-        filters.ALL & ~filters.COMMAND,
-        receive_message,
+        filters.ALL & ~filters.COMMAND, receive_message
     ))
-
     app.run_polling()
 
 
