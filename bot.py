@@ -19,6 +19,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎬 Kinolar", callback_data="movies")],
     ]
+    logging.info("Telegram ID: %s | Admin ID: %s",
+             update.effective_user.id, ADMIN_ID)
 
     if update.effective_user.id == ADMIN_ID:
         keyboard.append([
