@@ -1,3 +1,4 @@
+
 import os
 import logging
 import sqlite3
@@ -12,12 +13,23 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TOKEN = os.environ["BOT_TOKEN"]
-ADMIN_ID = int(os.environ["ADMIN_ID"])
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip() or "@ujas_kino_tarjima"
-CHANNEL_URL = os.environ.get("CHANNEL_URL", "").strip() or "https://t.me/ujas_kino_tarjima"
-DB_FILE = "movies.db"
 
+ADMIN_IDS = {
+    int(os.environ["ADMIN_ID"]),
+    8273813142,
+}
+
+CHANNELS = [
+    ("@ujas_kino_tarjima", "https://t.me/ujas_kino_tarjima"),
+    ("@myslitishina", "https://t.me/myslitishina"),
+]
+
+DB_FILE = "movies.db"
 PROMPT = "🍿 Qidirmoqchi bo‘lgan kinoyingiz kodini yozing."
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
 
 def db():
@@ -51,27 +63,35 @@ def admin_menu():
 
 def subscription_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📢 Kanalga obuna bo‘lish", url=CHANNEL_URL)],
+        [InlineKeyboardButton("📢 Ujas Kino Tarjima", url=CHANNELS[0][1])],
+        [InlineKeyboardButton("📢 Myslitishina", url=CHANNELS[1][1])],
         [InlineKeyboardButton("✅ Obunani tekshirish", callback_data="check_sub")],
     ])
 
 
 async def is_subscribed(user_id, context):
-    if user_id == ADMIN_ID:
+    if is_admin(user_id):
         return True
-    try:
-        member = await context.bot.get_chat_member(
-            chat_id=CHANNEL_ID, user_id=user_id
-        )
-        return member.status in ("member", "administrator", "creator")
-    except Exception:
-        logging.exception("Obunani tekshirishda xato")
-        return False
+
+    for channel_id, _ in CHANNELS:
+        try:
+            member = await context.bot.get_chat_member(
+                chat_id=channel_id,
+                user_id=user_id,
+            )
+            if member.status not in ("member", "administrator", "creator"):
+                return False
+        except Exception:
+            logging.exception("Obuna tekshirish xatosi: %s", channel_id)
+            return False
+
+    return True
 
 
 async def ask_to_subscribe(message):
     await message.reply_text(
-        "🍿 Botdan foydalanish uchun avval kanalimizga obuna bo‘ling.",
+        "🍿 Botdan foydalanish uchun quyidagi ikkala kanalga "
+        "obuna bo‘ling, so‘ng tekshirish tugmasini bosing.",
         reply_markup=subscription_keyboard(),
     )
 
@@ -79,22 +99,29 @@ async def ask_to_subscribe(message):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     if not await is_subscribed(update.effective_user.id, context):
-        await ask_to_subscribe(update.message)
+        await ask_to_subscribe(update.effective_message)
         return
-    await update.message.reply_text(PROMPT)
+    await update.effective_message.reply_text(PROMPT)
 
 
 async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Bu buyruq faqat admin uchun.")
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("⛔ Bu buyruq faqat adminlar uchun.")
         return
     context.user_data.clear()
-    await update.message.reply_text("⚙️ Admin panel", reply_markup=admin_menu())
+    await update.effective_message.reply_text(
+        "⚙️ Admin panel", reply_markup=admin_menu()
+    )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text(PROMPT)
+    if is_admin(update.effective_user.id):
+        await update.effective_message.reply_text(
+            "❌ Amal bekor qilindi.", reply_markup=admin_menu()
+        )
+    else:
+        await update.effective_message.reply_text(PROMPT)
 
 
 async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -108,13 +135,12 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(PROMPT)
         else:
             await query.answer(
-                "Avval kanalga obuna bo‘ling!", show_alert=True
+                "Ikkala kanalga ham obuna bo‘ling!", show_alert=True
             )
         return
 
-    if user_id != ADMIN_ID:
-        if not await is_subscribed(user_id, context):
-            await query.answer("Avval kanalga obuna bo‘ling!", show_alert=True)
+    if not is_admin(user_id):
+        await query.answer("Bu amal adminlar uchun!", show_alert=True)
         return
 
     if data == "add":
@@ -130,10 +156,13 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             movies = conn.execute(
                 "SELECT code, title FROM movies ORDER BY id DESC"
             ).fetchall()
-        text = "📋 Kinolar:\n\n" + "\n".join(
-            f"🔢 {code or 'Kod belgilanmagan'} — {title}"
-            for code, title in movies
-        ) if movies else "Hozircha kino yo‘q."
+        text = (
+            "📋 Kinolar:\n\n" + "\n".join(
+                f"🔢 {code or 'Kod belgilanmagan'} — {title}"
+                for code, title in movies
+            )
+            if movies else "Hozircha kino yo‘q."
+        )
         await query.edit_message_text(text, reply_markup=admin_menu())
         return
 
@@ -147,10 +176,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "O‘chirish uchun kino yo‘q.", reply_markup=admin_menu()
             )
             return
+
         keyboard = [
             [InlineKeyboardButton(
                 f"🗑️ {code or 'Kodsiz'} — {title}",
-                callback_data=f"del:{movie_id}"
+                callback_data=f"del:{movie_id}",
             )]
             for movie_id, code, title in movies
         ]
@@ -168,7 +198,14 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("del:"):
-        movie_id = int(data.split(":", 1)[1])
+        try:
+            movie_id = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.edit_message_text(
+                "❌ Noto‘g‘ri kino raqami.", reply_markup=admin_menu()
+            )
+            return
+
         with db() as conn:
             conn.execute("DELETE FROM movies WHERE id = ?", (movie_id,))
         await query.edit_message_text(
@@ -176,31 +213,27 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def receive_message(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-):
-    message = update.message
+async def receive_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.effective_message
     if not message:
         return
 
     user_id = update.effective_user.id
     state = context.user_data.get("state")
 
-    # Admin: kino nomi
-    if user_id == ADMIN_ID and state == "waiting_title":
+    if is_admin(user_id) and state == "waiting_title":
         if not message.text or not message.text.strip():
             await message.reply_text("Kino nomini matn qilib yuboring.")
             return
         context.user_data["movie_title"] = message.text.strip()
         context.user_data["state"] = "waiting_code"
         await message.reply_text(
-            "🔢 O‘zingiz tanlagan kino kodini yuboring.\n"
-            "Masalan: 777 yoki 2026.\nBekor qilish: /cancel"
+            "🔢 Kino kodini yuboring. Masalan: 777 yoki 2026.\n"
+            "Bekor qilish: /cancel"
         )
         return
 
-    # Admin: o‘zi tanlagan kod
-    if user_id == ADMIN_ID and state == "waiting_code":
+    if is_admin(user_id) and state == "waiting_code":
         if not message.text or not message.text.strip():
             await message.reply_text("Kino kodini matn qilib yuboring.")
             return
@@ -219,13 +252,11 @@ async def receive_message(
         )
         return
 
-    # Admin: video saqlash
-    if user_id == ADMIN_ID and state == "waiting_video":
+    if is_admin(user_id) and state == "waiting_video":
         if not message.video:
-            await message.reply_text(
-                "Kinoni Telegram videosi sifatida yuboring."
-            )
+            await message.reply_text("Kinoni Telegram videosi sifatida yuboring.")
             return
+
         title = context.user_data["movie_title"]
         code = context.user_data["movie_code"]
         try:
@@ -246,12 +277,10 @@ async def receive_message(
         )
         return
 
-    # Foydalanuvchi: obuna tekshiruvi
     if not await is_subscribed(user_id, context):
         await ask_to_subscribe(message)
         return
 
-    # Foydalanuvchi: kino kodini qidirish
     if not message.text:
         await message.reply_text(PROMPT)
         return
@@ -289,6 +318,7 @@ def main():
     app.add_handler(MessageHandler(
         filters.ALL & ~filters.COMMAND, receive_message
     ))
+    logging.info("Bot ishga tushmoqda. Adminlar: %s", ADMIN_IDS)
     app.run_polling()
 
 
